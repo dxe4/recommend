@@ -1,5 +1,6 @@
 import copy
 import time
+import sys
 from functools import partial
 
 import django
@@ -9,7 +10,7 @@ import requests
 from django.conf import settings
 from requests.auth import HTTPBasicAuth
 
-from common.models import Repo
+from common.models import Repo, StargazerRepo, StargazerProfiles
 
 
 auth = HTTPBasicAuth(settings.GH_USER, settings.GH_TOKEN)
@@ -18,7 +19,8 @@ authed_request = partial(requests.get, auth=auth)
 
 class PaginatedRequest(object):
 
-    def __init__(self, request_function, response_processor, default_params=None, default_data=None):
+    def __init__(self, request_function, response_processor,
+                 default_params=None, default_data=None, post_process_data=None):
         '''
         request_function: a function passed from the requests library
             this helps to use a functools.partial for authentication, so that
@@ -27,6 +29,7 @@ class PaginatedRequest(object):
             before paginiation / rate limit is processed
         default_params: get parameters to be send to all requests
         default_data: post/patch etc data to be send on each request
+        post_process_data: data to be passed to response_processor
 
         TODO change prints to logger.info
         '''
@@ -35,6 +38,7 @@ class PaginatedRequest(object):
         self.default_data = default_data or {}  # POST, PATCH etc
         self.response_processor = response_processor
         self.count = 0
+        self.post_process_data = post_process_data
 
     def request_data(self, params, data):
         default_params = copy.copy(self.default_params)
@@ -69,7 +73,7 @@ class PaginatedRequest(object):
             url, data=request_data['data'], params=request_data['params']
         )
         # process request
-        self.response_processor(response)
+        self.response_processor(response, post_process_data=self.post_process_data)
 
         # post process request
         self.wait_for_rate_limit(response.headers)
@@ -81,7 +85,7 @@ class PaginatedRequest(object):
 
 class MyStarsResponseProcessor(object):
 
-    def __call__(self, response):
+    def __call__(self, response, post_process_data=None):
         repositories = []
         data = response.json()
 
@@ -95,23 +99,73 @@ class MyStarsResponseProcessor(object):
             description = repository.get("description")
 
             repo = Repo(
-                stargazers_url=stargazers_url, stargazers_count=stargazers_count,
-                full_name=full_name, description=description, username=settings.GH_USER
+                stargazers_url=stargazers_url,
+                stargazers_count=stargazers_count, full_name=full_name,
+                description=description,
+                username=settings.GH_USER
             )
             repositories.append(repo)
 
         Repo.objects.bulk_create(repositories)
 
 
-if __name__ == '__main__':
-    params = {
-        'visibility': 'public',
-        'sort': 'created',
-        'direction': 'desc',
-    }
+class FetchStargazers(object):
+
+    def __call__(self, response, post_process_data=None):
+        stargazers = []
+        repo_origin = post_process_data['repo_origin']
+        data = response.json()
+
+        for stargazer in data:
+            username = stargazer['login']
+
+            profile = StargazerProfiles(
+                username=username,
+                origin=repo_origin,
+            )
+            stargazers.append(profile)
+
+        StargazerProfiles.objects.bulk_create(stargazers)
+
+
+stargazers_params = {
+    'visibility': 'public',
+    'sort': 'created',
+    'direction': 'desc',
+}
+
+def fetch_my_stars():
+
     url = 'https://api.github.com/user/starred'
 
     paginated_request = PaginatedRequest(
-        authed_request, MyStarsResponseProcessor(), default_params=params
+        authed_request, MyStarsResponseProcessor(),
+        default_params=stargazers_params
     )
     paginated_request.process(url)
+
+def repo_stargazers(url, repo_origin):
+    paginated_request = PaginatedRequest(
+        authed_request, FetchStargazers(),
+        default_params=stargazers_params,
+        post_process_data={'repo_origin': repo_origin}
+    )
+    paginated_request.process(url)
+
+
+def fetch_stargazers():
+    # for filter look into the model docs
+    repositories = Repo.objects.filter(stargazers_count__lte=59)
+    for repository in repositories:
+        repo_stargazers(repository.stargazers_url, repository)
+
+
+if __name__ == '__main__':
+    funcs = {
+        'my-stars': fetch_my_stars,
+        'related-stargazers': fetch_stargazers,
+    }
+    try:
+        funcs[sys.argv[1]]()
+    except KeyError:
+        print("possible options ", funcs.keys())
