@@ -8,6 +8,7 @@ django.setup()
 
 import requests
 from django.conf import settings
+from django.db.models import Count
 from requests.auth import HTTPBasicAuth
 
 from common.models import Repo, StargazerRepo, StargazerProfiles
@@ -62,7 +63,7 @@ class PaginatedRequest(object):
         if rate_limit_remaining is not None and rate_limit_remaining <= 2:
             wait_seconds = rate_limit_reset - time.time()
             print("waiting for {} s".format(wait_seconds))
-            time.sleep(wait_seconds)
+            time.sleep(int(wait_seconds) + 5)
 
     def process(self, url, params=None, data=None):
         # send request
@@ -118,6 +119,8 @@ class FetchStargazers(object):
 
         for stargazer in data:
             username = stargazer['login']
+            if username == settings.GH_USER:
+                continue
 
             profile = StargazerProfiles(
                 username=username,
@@ -155,15 +158,28 @@ def repo_stargazers(url, repo_origin):
 
 def fetch_stargazers():
     # for filter look into the model docs
-    repositories = Repo.objects.filter(stargazers_count__lte=59)
+    repositories = Repo.objects.filter(stargazers_count__lte=500)
     for repository in repositories:
         repo_stargazers(repository.stargazers_url, repository)
+
+def most_relevant_profiles():
+    # This doesn't imply anything, since some people have 30k stars..
+    # probably filter anything > 2k
+    most_relevant = StargazerProfiles.objects.all().values(
+        'username'
+    ).annotate(
+        count=Count("username")
+    ).order_by(
+        "-count"
+    )[0:10]
+    print(most_relevant)
 
 
 if __name__ == '__main__':
     funcs = {
         'my-stars': fetch_my_stars,
         'related-stargazers': fetch_stargazers,
+        'most-relevant': most_relevant_profiles
     }
     try:
         funcs[sys.argv[1]]()

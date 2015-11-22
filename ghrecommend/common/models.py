@@ -9,7 +9,7 @@ class Repo(models.Model):
         2 should not happen, to avoid too many requests
 
     stargazers_count:
-        preferably procss < 60 (or even less) for 2 reasons:
+        preferably procss < 500 (or even less) for 2 reasons:
             a) avoid too many requests
             b) avoid noise from popular libraries being starred by anyone
     '''
